@@ -1,28 +1,58 @@
+#' RowSums of element-wise products.
+#' Like an inner product, just vectorized for many y.
+#' This ensures R <--> JAGS code compatibility
+#'
+#' @aliases inprod
+#' @param x A matrix
+#' @param y A matrix
+#' @return A vector
+#' @encoding UTF-8
+#' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
+inprod = function(x, y) {
+  assert_types(x, "matrix")
+  assert_types(y, "matrix")
+  rowSums(x * y)
+}
+
+
 # Converts logical(0) to null. Returns x otherwise
 logical0_to_null = function(x) {
   if (length(x) > 0)
     return(x)
-  else return(NULL)
+  else
+    return(NULL)
 }
 
 
-#' Extracts the order from ARMA parameter name(s)
-#'
-#' If several names are provided (vector), it returns the maximum. If `pars_arma`
-#' is an empty string, it returns `0`.
-#'
-#' @aliases get_arma_order
-#' @keywords internal
-#' @param pars_arma Character vector
-#' @return integer
-get_arma_order = function(pars_arma) {
-  if (length(pars_arma) > 0) {
-    order_str = sub("(ma|ar)([0-9]+).*", "\\2", pars_arma)
-    order_max = max(as.numeric(order_str))
-    return(order_max)
-  } else {
-    return(0)
-  }
+# if((a %in% b) == FALSE) --> if(a %notin% b)
+`%notin%` = Negate(`%in%`)
+
+
+# Is this a continuous vector?
+is_continuous = function(x) {
+  is.numeric(x) &
+    length(unique(na.omit(x))) > 2
+}
+
+
+# List of categorical column names and their unique levels
+get_categorical_levels = function(df) {
+  assert_types(df, "data.frame", "tibble")
+  categorical_cols = colnames(df)[sapply(df, class) %in% c("factor", "logical", "character")]
+  sapply(df[, categorical_cols], unique)
+}
+
+# List of interpolated values at the values in "at". Rembember to remove par_x from "df"
+interpolate_continuous = function(fit, at) {
+  assert_types(fit, "mcpfit")
+  assert_numeric(at)
+
+  # Get numeric RHS data columns
+  data = fit$data[, sapply(fit$data, is.numeric), drop = FALSE]
+  data = data[, colnames(data) %notin% c(fit$pars$x, fit$pars$y, fit$pars$weights, fit$pars$varying)]
+
+  # Return interpolated
+  as.data.frame(lapply(data, function(col) stats::approx(x = fit$data[, fit$pars$x], y = col, xout = at)$y))
 }
 
 
@@ -38,6 +68,20 @@ release_questions = function() {
 }
 
 
+# Returns the AR order or NA if no AR
+get_ar_order = function(rhs_table) {
+  ar_order = ifelse("ar" %in% rhs_table$dpar, max(rhs_table$order, na.rm = TRUE), NA)
+}
+
+
+# Just returns cp_1, cp_2, etc.
+get_cp_pars = function(pars) {
+  assert_types(pars, "list")
+  assert_types(pars$reg, "character")
+  pars$reg[stringr::str_detect(pars$reg, "^cp_[0-9]+$") & !stringr::str_detect(pars$reg, "^cp_[0-9]+_sd$")]  # cp_1 but not cp_1_sd
+}
+
+
 #' Remove varying or population terms from a formula
 #'
 #' WARNING: removes response side from the formula
@@ -49,9 +93,8 @@ release_questions = function() {
 #' @return A formula
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#'
 remove_terms = function(form, remove) {
-  assert_types(form, "formula")
+  assert_types(form, "formula", len = c(2, 3))
   assert_value(remove, allowed = c("varying", "population"))
 
   # Find terms with "|"
@@ -89,7 +132,7 @@ remove_terms = function(form, remove) {
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
 to_formula = function(form) {
-  assert_types(form, "character", "formula")
+  assert_types(form, "character", "formula", len = c(1, 3))
   if (is.character(form)) {
     # Add tilde
     if (!stringr::str_detect(form, "^(\\s|)~")) {
@@ -98,8 +141,120 @@ to_formula = function(form) {
     form = stats::as.formula(form)
   }
 
-  return(form)
+  form
 }
+
+
+#' Homogonize enumerating strings in mcp
+#'
+#' Nice for error messages.
+#'
+#' @aliases collapse_quote
+#' @keywords internal
+#' @param x A character vector
+#' @return Character
+#' @encoding UTF-8
+#' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
+and_collapse = function(x) {
+  assert_types(x, "character")
+  paste0(x, collapse = " and ")
+}
+
+
+#' Converts formula to string
+#'
+#' Note: this uses base R and circumvents the length-limitation of `deparse()`
+#' and `format()`.
+#'
+#' @aliases formula_to_char
+#' @keywords internal
+#' @param form Any valid formula with any number of tildes.
+#' @return A character.
+#' @encoding UTF-8
+#' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
+formula_to_char = function(form) {
+  assert_types(form, "formula", len = c(1, 3))
+  form_char = as.character(form)
+  if (length(form_char) == 2 & form_char[1] == "~") {
+    return(paste0(form_char, collapse = " "))
+  } else if (length(form_char == 3) & form_char[1] == "~") {
+    return(paste0(form_char[c(2, 3)], collapse = " ~ "))
+  } else {
+    stop_github("Could not decode formula ", deparse(form, width.cutoff = 500))
+  }
+}
+
+
+#' Returns the right-hand-side of a formula
+#'
+#' @aliases get_rhs
+#' @keywords internal
+#' @param form Formula, e.g. `~x`, `y ~ x` or `y ~ z ~ x`
+#' @return A formula
+#' @encoding UTF-8
+#' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
+get_rhs = function(form) {
+  assert_types(form, "formula")
+  if (length(form) == 2) {
+    return(form)
+  } else if (length(form) == 3) {
+    return(form[-2])
+  }
+}
+
+
+#' Returns all vars in the RHS of an mcpmodel
+#'
+#' @aliases get_rhs_vars
+#' @keywords internal
+#' @inheritParams mcp
+#' @return Character vector with unique term names
+#' @encoding UTF-8
+#' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
+get_rhs_vars = function(model) {
+  assert_types(model, "mcpmodel")
+
+  model %>%
+    lapply(get_rhs) %>%
+    lapply(all.vars) %>%
+    unlist() %>%
+    unique()
+}
+
+#' Returns all vars in the RHS of an mcpmodel
+#'
+#' @aliases get_model_vars
+#' @keywords internal
+#' @inheritParams mcp
+#' @return Character vector with unique term names
+#' @encoding UTF-8
+#' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
+get_model_vars = function(model) {
+  assert_types(model, "mcpmodel")
+
+  model %>%
+    lapply(all.vars) %>%
+    unlist() %>%
+    unique()
+}
+
+
+#' Create model matrix from rhs_table
+#'
+#' cbinds rhs_table$matrix_data
+#' @aliases get_rhs_matrix
+#' @keywords internal
+#' @param rhs_table The output of `get_rhs_table()`
+#' @return matrix with one column for each row in `rhs_table`
+#' @encoding UTF-8
+#' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
+get_rhs_matrix = function(rhs_table) {
+  assert_types(rhs_table, "data.frame", "tibble")
+  suppressMessages(dplyr::bind_cols(rhs_table$matrix_data, .name_repair = "unique")) %>% # Suppress message about lacking column names
+    as.matrix() %>%
+    magrittr::set_colnames(rhs_table$code_name)
+}
+
 
 #' Expand samples with quantiles
 #'
@@ -120,7 +275,6 @@ to_formula = function(form) {
 #' @return A tidybayes long format tibble with the column "quantile"
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#'
 get_quantiles = function(samples, quantiles, xvar, yvar, facet_by = NULL) {
   # Trick to declare no facet = common group for all
   if (is.null(facet_by))
@@ -137,9 +291,6 @@ get_quantiles = function(samples, quantiles, xvar, yvar, facet_by = NULL) {
       y = stats::quantile(!!yvar, probs = .data$quantile[1])
     )
 }
-
-# Hack to make R CMD pass for function geom_cp_density()
-utils::globalVariables(c("value", "..scaled..", ".chain", "cp_name", "."))
 
 
 #' Print mcplist
@@ -181,9 +332,19 @@ print.mcplist = function(x, ...) {
 #' class(mytext) = "mcptext"
 #' print(mytext)
 print.mcptext = function(x, ...) {
-  assert_types(x, "character")
+  assert_types(x, "character", len = 1)
   assert_ellipsis(...)
   cat(x)
+}
+
+
+# Set model environment to parent.frame() for prettier printing
+# and because it was created in a different environment than inteded for use.
+fix_model_environment = function(model) {
+  assert_types(model, "mcpmodel")
+  for (i in seq_along(model))
+    environment(model[[i]]) = globalenv()
+  model
 }
 
 
@@ -225,63 +386,42 @@ print.mcptext = function(x, ...) {
 #' plot(ex_with_fit$fit)
 #'}
 mcp_example = function(name, sample = FALSE) {
-  assert_value(name, c("demo", "ar", "binomial", "intercepts", "rel_prior", "quadratic", "trigonometric", "varying", "variance"))
+  assert_types(name, "character", len = 1)
+  assert_logical(sample, len = 1)
   data = data.frame()  # To make R CMD Check happy.
-  if (name == "demo") {
-    call = "# Define model
-model = list(
-  response ~ 1,
-  ~ 0 + time,
-  ~ 1 + time
-)
 
-# Simulate data
-empty = mcp(model, sample = FALSE)
-set.seed(40)
-data = tibble::tibble(
-  time = runif(100, 0, 100),
-  response = empty$simulate(
-    time,
-    cp_1 = 30,
-    cp_2 = 70,
-    int_1 = 10,
-    int_3 = 0,
-    sigma = 4,
-    time_2 = 0.5,
-    time_3 = -0.2)
-)
-
-# Run sampling
-if (sample == TRUE)
-  fit = mcp(model, data)"
-  } else if (name == "ar") {
-    call = "# Define model
+  examples = list(
+ar = "# Define model
 model = list(
   price ~ 1 + ar(2),
   ~ 0 + time + ar(1)
 )
 
 # Simulate data
-empty = mcp(model, sample = FALSE)
 set.seed(42)
-data = tibble::tibble(
+data = data.frame(
   time = 1:200,
-  price = empty$simulate(
-    time,
-    cp_1 = 120,
-    int_1 = 20,
-    time_2 = 0.5,
-    sigma_1 = 5,
-    ar1_1 = 0.7,
-    ar2_1 = 0.2,
-    ar1_2 = -0.4)
+  price = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
+)
+empty = mcp(model, data, sample = FALSE)
+data$price = NULL  # Simulate new
+data$price = empty$simulate(empty, data,
+  cp_1 = 120,
+  Intercept_1 = 20,
+  time_2 = 0.5,
+  sigma_1 = 5,
+  ar1_1 = 0.7,
+  ar2_1 = 0.2,
+  ar1_2 = -0.4
 )
 
 # Run sampling
 if (sample == TRUE)
-  fit = mcp(model, data)"
-  } else if (name == "binomial") {
-    call = "# Define model
+  fit = mcp(model, data)",
+
+
+
+binomial = "# Define model
 model = list(
   y | trials(N) ~ 1,  # constant rate
   ~ 0 + x,  # joined changing rate
@@ -289,191 +429,249 @@ model = list(
 )
 
 # Simulate data
-empty = mcp(model, family = binomial(), sample = FALSE)
 set.seed(42)
-data = tibble::tibble(
+data = data.frame(
   x = 1:100,
-  N = sample(10, length(x), replace=TRUE),
-  y = empty$simulate(
-    x = x,
-    N,
-    cp_1 = 30,
-    cp_2 = 70,
-    int_1 = 2,
-    int_3 = 0.4,
-    x_2 = -0.2,
-    x_3 = 0.05)
+  N = sample(10, 100, replace=TRUE),
+  y = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
+)
+empty = mcp(model, data, family = binomial(), sample = FALSE)
+data$y = empty$simulate(empty, data,
+  cp_1 = 30,
+  cp_2 = 70,
+  Intercept_1 = 2,
+  Intercept_3 = 0.4,
+  x_2 = -0.2,
+  x_3 = 0.05
 )
 
 # Run sampling
 if (sample == TRUE)
   fit = mcp(model, data, family = binomial(), adapt = 5000)
-"
-  } else if (name == "intercepts") {
-    call = "# Define model
+",
+
+
+
+demo = "# Define model
+model = list(
+  response ~ 1,
+  ~ 0 + time,
+  ~ 1 + time
+)
+
+# Simulate data
+set.seed(40)
+data = data.frame(
+  time = runif(100, 0, 100),
+  response = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
+)
+empty = mcp(model, data, sample = FALSE)
+data$response = empty$simulate(empty, data,
+  cp_1 = 30,
+  cp_2 = 70,
+  Intercept_1 = 10,
+  time_2 = 0.5,
+  Intercept_3 = 0,
+  time_3 = -0.2,
+  sigma_1 = 4
+)
+
+# Run sampling
+if (sample == TRUE)
+  fit = mcp(model, data)",
+
+
+
+intercepts = "# Define model
 model = list(
   y ~ 1,
   ~ 1
 )
 
 # Simulate data
-empty = mcp(model, sample = FALSE, par_x = \"x\")
 set.seed(40)
-data = tibble::tibble(
+data = data.frame(
   x = runif(100, 0, 100),
-  y = empty$simulate(
-    x,
-    cp_1 = 50,
-    int_1 = 10,
-    int_2 = 20,
-    sigma = 8)
+  y = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
+)
+empty = mcp(model, data, sample = FALSE, par_x = 'x')
+data$y = empty$simulate(empty, data,
+  cp_1 = 50,
+  Intercept_1 = 10,
+  Intercept_2 = 20,
+  sigma_1 = 8
 )
 
 # Run sampling
 if (sample == TRUE)
-  fit = mcp(model, data, par_x = \"x\")"
-  } else if (name == "quadratic") {
-    call = "# Define model
+  fit = mcp(model, data, par_x = 'x')",
+
+
+
+multiple = "# Define model
+model = list(
+  y ~ 1 + x:group + z,
+  ~ 1 + x + group,
+  ~ 0 + I(x^2)
+)
+
+# Simulate data
+data = data.frame(
+  x = 1:220,
+  group = rep(c('A', 'B', 'C', 'D'), 55),
+  z = rnorm(220, mean = 1:220, sd = 25),
+  y = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
+)
+empty = mcp(model, data, sample = FALSE, par_x = 'x')
+data$y = empty$simulate(empty, data,
+  cp_1 = 100,
+  cp_2 = 180,
+
+  Intercept_1 = 10,
+  z_1 = 0.2,
+  xgroupA_1 = -0.75,
+  xgroupB_1 = -0.25,
+  xgroupC_1 = 0.25,
+  xgroupD_1 = 0.75,
+
+  Intercept_2 = 40,
+  x_2 = -0.8,
+  groupB_2 = 15,
+  groupC_2 = 30,
+  groupD_2 = 45,
+
+  xE2_3 = 0.1,
+
+  sigma_1 = 5
+)
+
+# Run sampling
+if (sample == TRUE)
+  fit = mcp(model, data, par_x = 'x', cores = 3)",
+
+
+
+quadratic = "# Define model
 model = list(
   y ~ 1,
   ~ 0 + x + I(x^2)
 )
 
 # Simulate data
-empty = mcp::mcp(model, sample = FALSE)
 set.seed(42)
-data = tibble::tibble(
+data = data.frame(
   x = seq(0, 40, by = 0.5),
-  y = empty$simulate(
-    x,
-    cp_1 = 15,
-    int_1 = 10,
-    sigma = 30,
-    x_2 = -30,
-    x_2_E2 = 1.5)
+  y = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
+)
+empty = mcp::mcp(model, data, sample = FALSE)
+data$y = empty$simulate(empty, data,
+  cp_1 = 15,
+  Intercept_1 = 10,
+  x_2 = -30,
+  xE2_2 = 1.5,
+  sigma_1 = 30
 )
 
 # Run sampling
 if (sample == TRUE)
-  fit = mcp(model, data)"
-  } else if (name == "rel_prior") {
-    call = "# Define model
-model = list(
-  y ~ 1 + x,
-  ~ rel(1) + rel(x),
-  rel(1) ~ 0 + x
-)
+  fit = mcp(model, data)",
 
-# Simulate data
-empty = mcp::mcp(model, sample = FALSE)
-set.seed(40)
-data = tibble::tibble(
-  x = 1:100,
-  y = empty$simulate(
-    x,
-    cp_1 = 25,
-    cp_2 = 40,
-    int_1 = 25,
-    int_2 = -10,
-    sigma = 7,
-    x_1 = 1,
-    x_2 = -3,
-    x_3 = 0.5)
-)
 
-# Run sampling
-if (sample == TRUE)
-  fit = mcp(model, data)"
-  } else if (name == "trigonometric") {
-    call = "model = list(
+
+trigonometric = "model = list(
   y ~ 1 + sin(x),
   ~ 1 + cos(x) + x
 )
 
 # Simulate data
-empty = mcp::mcp(model, sample = FALSE)
-set.seed(40)
-data = tibble::tibble(
+set.seed(42)
+data = data.frame(
   x = seq(0, 35, by = 0.2),
-  y = empty$simulate(
-    x,
-    cp_1 = 17,
-    int_1 = 10,
-    x_1_sin = 10,
-    x_2_cos = 8,
-    int_2 = 10,
-    x_2 = 3,
-    sigma = 3
-  )
+  y = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
+)
+empty = mcp::mcp(model, data, sample = FALSE)
+data$y = empty$simulate(empty, data,
+  cp_1 = 17,
+  Intercept_1 = 10,
+  sinx_1 = 10,
+  Intercept_2 = 10,
+  x_2 = 3,
+  cosx_2 = 8,
+  sigma_1 = 3
 )
 
 # Run sampling
 if (sample == TRUE)
-  fit = mcp(model, data)"
-  } else if (name == "variance") {
-    call = "# Define model
+  fit = mcp(model, data)",
+
+
+
+variance = "# Define model
 model = list(
   y ~ 1,
   ~ 0 + sigma(1 + x),
   ~ 0 + x
 )
 
+
 # Simulate data
-empty = mcp::mcp(model, sample = FALSE)
-set.seed(30)
-data = tibble::tibble(
+set.seed(42)
+data = data.frame(
   x = 1:100,
-  y = empty$simulate(
-    x,
+  y = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
+)
+empty = mcp::mcp(model, data, sample = FALSE)
+data$y = empty$simulate(empty, data,
     cp_1 = 25,
     cp_2 = 75,
-    int_1 = 20,
+    Intercept_1 = 20,
     x_3 = 2,
     sigma_1 = 7,
     sigma_2 = 25,
-    sigma_x_2 = -0.45)
+    sigma_x_2 = -0.45
   )
 
 # Run sampling
 if (sample == TRUE)
-  fit = mcp(model, data)"
-  } else if (name == "varying") {
-    call = "# Define model
+  fit = mcp(model, data)",
+
+
+
+varying = "# Define model
 model = list(
   y ~ 1 + x,  # intercept + slope
   1 + (1|id) ~ 0 + x  # joined slope
 )
 
 # Simulate data
-empty = mcp::mcp(model, sample=FALSE)
-data = tibble::tibble(id = c(\"John\", \"Benny\", \"Rose\", \"Cath\", \"Bill\", \"Erin\")) %>%
+set.seed(42)
+data = tibble::tibble(id = c('John', 'Benny', 'Rose', 'Cath', 'Bill', 'Erin')) %>%
   tidyr::expand_grid(x = seq(1, 100, by=4)) %>%
   dplyr::mutate(
     id_numeric = as.numeric(as.factor(id)),
-    y = empty$simulate(
-      x,
-      cp_1 = 40,
-      cp_1_id = 7*(id_numeric - mean(id_numeric)),
-      int_1 = 15,
-      x_1 = 3,
-      x_2 = -2,
-      sigma = 25
-    )
+    y = 2.  # or whatever signals 'numeric'. Will be replaced by simulation below.
   )
+empty = mcp(model, data, sample = FALSE)
+data$y = empty$simulate(empty, data,
+  cp_1 = 40,
+  cp_1_id = 7*(data$id_numeric - mean(data$id_numeric)),
+  Intercept_1 = 15,
+  x_1 = 3,
+  x_2 = -2,
+  sigma_1 = 25
+)
 
 # Run sampling
 if (sample == TRUE)
   fit = mcp(model, data)"
-  } else {
-    stop("Unknown `name`: ", name)
-  }
+  )
 
   # Run the code
-  eval(parse(text = call))
+  assert_value(name, allowed = names(examples))
+  eval(parse(text = examples[[name]]))
 
   # Get stuff ready for return
-  for (i in seq_along(model))
-    environment(model[[i]]) = parent.frame()
+  model = fix_model_environment(model)
 
   class(call) = c("mcptext", "character")
   class(model) = c("mcplist", "list")
@@ -484,11 +682,12 @@ if (sample == TRUE)
   if (sample == FALSE)
     fit = NULL
 
-  return(list(
+  # Return
+  list(
     model = model,  # Bind them to global workspace for nicer display
     data = data,
     simulated = simulated,  # response is always the last column
     fit = fit,
     call = call
-  ))
+  )
 }

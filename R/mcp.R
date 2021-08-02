@@ -23,15 +23,15 @@
 #'   * *Extended formulas:*, e.g., `~ I(x^2) + exp(x) + sin(x)`. [Read more](https://lindeloev.github.io/mcp/articles/formulas.html).
 #'
 #'   * *Variance:* e.g., `~sigma(1)` for a simple variance change or
-#'     `~sigma(rel(1) + I(x^2))`) for more advanced variance structures. [Read more](https://lindeloev.github.io/mcp/articles/variance.html)
+#'     `~sigma(1 + I(x^2))`) for more advanced variance structures. [Read more](https://lindeloev.github.io/mcp/articles/variance.html)
 #'
 #'   * *Autoregression:* e.g., `~ar(1)` for a simple onset/change in AR(1) or
 #'     `ar(2, 0 + x`) for an AR(2) increasing by `x`. [Read more](https://lindeloev.github.io/mcp/articles/arma.html)
 #'
-#' @param prior Named list. Names are parameter names (`cp_i`, `int_i`, `xvar_i`,
+#' @param prior Named list. Names are parameter names (`cp_i`, `Intercept_i`, `xvar_i`,
 #'  `sigma``) and the values are either
 #'
-#'  * A JAGS distribution (e.g., `int_1 = "dnorm(0, 1) T(0,)"`) indicating a
+#'  * A JAGS distribution (e.g., `Intercept_1 = "dnorm(0, 1) T(0,)"`) indicating a
 #'      conventional prior distribution. Uninformative priors based on data
 #'      properties are used where priors are not specified. This ensures good
 #'      parameter estimations, but it is a questionable for hypothesis testing.
@@ -39,8 +39,8 @@
 #'      details. Change points are forced to be ordered through the priors using
 #'      truncation, except for uniform priors where the lower bound should be
 #'      greater than the previous change point, `dunif(cp_1, MAXX)`.
-#'  * A numerical value (e.g., `int_1 = -2.1`) indicating a fixed value.
-#'  * A model parameter name (e.g., `int_2 = "int_1"`), indicating that this parameter is shared -
+#'  * A numerical value (e.g., `Intercept_1 = -2.1`) indicating a fixed value.
+#'  * A model parameter name (e.g., `Intercept_2 = "Intercept_1"`), indicating that this parameter is shared -
 #'      typically between segments. If two varying effects are shared this way,
 #'      they will need to have the same grouping variable.
 #'  * A scaled Dirichlet prior is supported for change points if they are all set to
@@ -50,10 +50,10 @@
 #'      samples less efficiently, so you will often need to set `iter` higher.
 #'      It is recommended for hypothesis testing and for the estimation of more
 #'      than 5 change points. [Read more](https://lindeloev.github.io/mcp/articles/priors.html).
-#' @param family One of `gaussian()`, `binomial()`, `bernoulli()`, or `poission()`.
-#'   Only default link functions are currently supported.
-#' @param par_x String (default: NULL). Only relevant if no segments contains
-#'   slope (no hint at what x is). Set this, e.g., par_x = "time".
+#' @param family One of `gaussian()`, `binomial()`, `bernoulli()`, or `poission()`
+#'   with a supported link function, e.g., `gaussian(link = "log")`.
+#'   Custom families can also be provided, e.g., `mcpfamily(gaussian(link = "log"))`.
+#' @param par_x String (default: `NULL` which is auto-detect).
 #' @param sample One of
 #'   * `"post"`: Sample the posterior.
 #'   * `"prior"`: Sample only the prior. Plots, summaries, etc. will
@@ -102,15 +102,14 @@
 #' @seealso \code{\link{get_segment_table}}
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#' @importFrom stats gaussian binomial
 #' @export
 #' @examples
 #' \donttest{
 #' # Define the segments using formulas. A change point is estimated between each formula.
 #' model = list(
-#'   response ~ 1,  # Plateau in the first segment (int_1)
+#'   response ~ 1,  # Plateau in the first segment (Intercept_1)
 #'   ~ 0 + time,    # Joined slope (time_2) at cp_1
-#'   ~ 1 + time     # Disjoined slope (int_3, time_3) at cp_2
+#'   ~ 1 + time     # Disjoined slope (Intercept_3, time_3) at cp_2
 #' )
 #'
 #' # Fit it and sample the prior too.
@@ -150,10 +149,10 @@
 #'
 #' # Set priors and re-run
 #' prior = list(
-#'   int_1 = 15,
+#'   Intercept_1 = 15,
 #'   time_2 = "dt(0, 2, 1) T(0, )",  # t-dist slope. Truncated to positive.
 #'   cp_2 = "dunif(cp_1, 80)",    # change point to segment 2 > cp_1 and < 80.
-#'   int_3 = "int_1"           # Shared intercept between segment 1 and 3
+#'   Intercept_3 = "Intercept_1"           # Shared intercept between segment 1 and 3
 #' )
 #'
 #' fit3 = mcp(model, data = ex$data, prior = prior)
@@ -161,9 +160,8 @@
 #' # Show the JAGS model
 #' demo_fit$jags_code
 #' }
-#'
 mcp = function(model,
-               data = NULL,
+               data,
                prior = list(),
                family = gaussian(),
                par_x = NULL,
@@ -178,48 +176,40 @@ mcp = function(model,
   ################
   # CHECK INPUTS #
   ################
-
-  # Check data
-  if (is.null(data) && sample %in% c("post", "both"))
-    stop("Cannot sample without data.")
-
-  if (is.null(data) && sample == "prior")
-    stop("Cannot sample prior without data as some default priors depend on data. Possible solution: set priors to be independent of data (no SDY, MEANX, etc.) and provide a bit of mock-up data, which then will have no effect.")
-
-  if (!is.null(data)) {
-    assert_types(data, "data.frame", "tibble")
-    data = data.frame(data)  # Force into data frame
-  }
-
   # Check model
-  assert_types(model, "list")
+  assert_types(model, "mcpmodel")
 
-  if (length(model) == 0)
-    stop("At least one segment is needed in `model`")
+  # Check data and data-model correspondence
+  assert_types(data, "data.frame", "tibble")
+  data = data.frame(data)
 
-  for (segment in model) {
-    if (!inherits(segment, "formula"))
-      stop("all segments must be formulas.")
-  }
+  assert_types(par_x, "null", "character", len = c(0, 1))
+  par_x = get_par_x(model, data, par_x)
+  rhs_vars = get_rhs_vars(model)
+  assert_data_cols(data, cols = rhs_vars, fail_types = c("na", "nan"))
+
+  model_vars = unique(c(get_model_vars(model), par_x))
+  assert_data_cols(data, cols = model_vars, fail_types = c("infinite"))
+  data = data[, model_vars]  # Remove unused data
 
   # Check prior
   assert_types(prior, "list")
 
   which_duplicated = duplicated(names(prior))
   if (any(which_duplicated))
-    stop("`prior` has duplicated entries for the same parameter: ", paste0(names(prior)[which_duplicated]), collapse = ", ")
+    stop("`prior` has duplicated entries for the same parameter: ", and_collapse(names(prior)[which_duplicated]))
 
-  # Check and recode family
-  if (class(family) != "family")
-    stop("`family` is not a valid family. Should be gaussian(), binomial(), etc.")
+  # Transform family to mcpfamily
+  if (is.family(family) == FALSE & is.mcpfamily(family) == FALSE)
+    stop("`family` is not a valid family or mcpfamily. Should be gaussian(), binomial(), mcpfamily(guassian(link = 'log')), etc.")
 
-  family = mcpfamily(family)  # convert to mcp family
+  if (is.mcpfamily(family) == FALSE)
+    family = mcpfamily(family)
 
   # More checking...
-  assert_types(par_x, "null", "character")
   assert_value(sample, allowed = c("post", "prior", "both", "none", FALSE))
-  assert_integer(cores, lower = 1)
-  assert_integer(chains, lower = 1)
+  assert_integer(cores, lower = 1, len = 1)
+  assert_integer(chains, lower = 1, len = 1)
   assert_types(inits, "null", "list")
 
   if (cores > chains)
@@ -239,16 +229,17 @@ mcp = function(model,
   # MODEL BUILDING #
   ##################
   # Make an abstract table representing the segments and their relations.
-  # ("ST" for "segment table").
-  ST = get_segment_table(model, data, family, par_x)
+  par_x = get_par_x(model, data, par_x)
+  ST = get_segment_table(model, data, family, par_x)  #"ST" for "segment table"
+  rhs_table = get_rhs_table(model, data, family, par_x)
 
   # Make prior
-  prior = get_prior(ST, family, prior)
+  prior = get_prior(ST, rhs_table, family, prior)
 
   # Make lists of parameters
   all_pars = names(prior)  # There is a prior for every parameter
   pars = list(
-    x = unique(ST$x),
+    x = par_x,
     y = unique(ST$y),
     trials = logical0_to_null(stats::na.omit(unique(ST$trials))),
     weights = logical0_to_null(stats::na.omit(unique(ST$weights))),
@@ -256,7 +247,7 @@ mcp = function(model,
     sigma = all_pars[stringr::str_detect(all_pars, "^sigma_")],
     arma = all_pars[stringr::str_detect(all_pars, "(^ar|^ma)[0-9]")]
   )
-  pars$reg = all_pars[!all_pars %in% c(pars$varying, pars$sigma, pars$arma)]
+  pars$reg = all_pars[all_pars %notin% c(pars$varying, pars$sigma, pars$arma)]
   pars$population = c(pars$reg, pars$sigma, pars$arma)
 
   # Check parameters
@@ -265,64 +256,58 @@ mcp = function(model,
     if (family$link %in% c("logit", "probit"))
       message("The current implementation of autoregression can be fragile for link='logit'. In particular, if there are any all-success trials (e.g., 10/10), the only solution is for 'ar' to be 0.00. If fitting succeeds, do a proper assessment of model convergence.")
 
-    if (is.unsorted(data[, pars$x]) && is.unsorted(rev(data[, pars$x])))
-      message("'", pars$x, "' is unordered. Please note that ar() applies in the order of data of the data frame - not the values.")
+    if (is.unsorted(data[, par_x]) && is.unsorted(rev(data[, par_x])))
+      message("'", par_x, "' is unordered. Please note that ar() applies in the order of data of the data frame - not the values.")
   }
 
-  # Make formula_str and simulate
-  formula_str_sim = get_all_formulas(ST, prior, pars$x, ytypes = c("ct", "sigma", "arma"))
-  simulate = get_simulate(formula_str_sim, pars, nrow(ST), family)
+  # Make formulas
+  formula_jags = get_formula_jags(ST, rhs_table, par_x, family)
+  formula_r = get_formula_r(formula_jags, rhs_table, pars)
 
   # Make jags code if it is not provided by the user
   if (is.null(jags_code)) {
-    max_arma_order = get_arma_order(pars$arma)
-    formula_str_jags = get_all_formulas(ST, prior, pars$x)
-    jags_code = get_jagscode(prior, ST, formula_str_jags, max_arma_order, family, sample)
+    ar_order = get_ar_order(rhs_table)
+    jags_code = get_jags_code(prior, ST, formula_jags, ar_order, family, sample, par_x)
   }
 
 
   ##########
   # SAMPLE #
   ##########
+  jags_data = get_jags_data(data, family, ST, rhs_table, jags_code, sample)
+
   # Sample posterior
   if (sample %in% c("post", "both")) {
-    samples = run_jags(
+    mcmc_post = run_jags(
       data = data,
       jags_code = jags_code,
-      pars = c(all_pars, "loglik_"),  # Monitor log-likelihood for loo/waic
-      ST = ST,
+      jags_data = jags_data,
+      pars = all_pars,  # Monitor log-likelihood for loo/waic
       cores = cores,
       sample = "post",
       n.chains = chains,
       n.iter = iter,
       n.adapt = adapt,
       inits = inits
-    )
-
-    # Move loglik columns out to it's own list, keeping parameters and loglik apart
-    loglik_cols = stringr::str_starts(colnames(samples[[1]]), 'loglik_')  # detect loglik cols
-    mcmc_loglik = lapply(samples, function(x) x[, loglik_cols])
-    mcmc_post = lapply(samples, function(x) x[, !loglik_cols])
+    ) %>%
+      recover_levels(data, ST)
   }
 
   # Sample prior
   if (sample %in% c("prior", "both")) {
-    samples = run_jags(
+    mcmc_prior = run_jags(
       data = data,
       jags_code = jags_code,
-      pars = all_pars,  # Not loglik
-      ST = ST,
+      jags_data = jags_data,
+      pars = all_pars,
       cores = cores,
       sample = "prior",
       n.chains = chains,
       n.iter = iter,
       n.adapt = adapt,
       inits = inits
-    )
-
-    # Move loglik columns out to it's own list, keeping parameters and loglik apart
-    loglik_cols = stringr::str_starts(colnames(samples[[1]]), 'loglik_')  # detect loglik cols
-    mcmc_prior = lapply(samples, function(x) x[, !loglik_cols])
+    ) %>%
+      recover_levels(data, ST)
   }
 
 
@@ -332,13 +317,10 @@ mcp = function(model,
   # Fill in the missing samples
   if (exists("mcmc_post")) class(mcmc_post) = "mcmc.list"
   if (exists("mcmc_prior")) class(mcmc_prior) = "mcmc.list"
-  if (exists("mcmc_loglik")) class(mcmc_loglik) = "mcmc.list"
   if (!exists("mcmc_post")) mcmc_post = NULL
   if (!exists("mcmc_prior")) mcmc_prior = NULL
-  if (!exists("mcmc_loglik")) mcmc_loglik = NULL
 
-
-  model = lapply(ST$form, stats::as.formula, env=globalenv())  # with explicit response and cp
+  model = lapply(ST$form, stats::as.formula, env=globalenv())
   class(model) = c("mcplist", "list")
   class(prior) = c("mcplist", "list")
   class(pars) = c("mcplist", "list")  # for nicer printing
@@ -355,19 +337,23 @@ mcp = function(model,
     # Results
     mcmc_post = mcmc_post,
     mcmc_prior = mcmc_prior,
-    mcmc_loglik = mcmc_loglik,
+    loglik = NULL,
     loo = NULL,
     waic = NULL,
 
     # Extracted model
     pars = pars,
     jags_code = jags_code,
-    simulate = simulate,
+    simulate = get_fitsimulate(pars),
 
     # Pass info to *.mcpfit() functions.
     # Not meant to be used by the end user.
-    .other = list(
-      ST = ST
+    .internal = list(
+      ST = ST,
+      rhs_table = rhs_table,
+      formula_jags = formula_jags,
+      formula_r = formula_r,
+      mcp_version = utils::packageVersion("mcp")  # For helpful messages about backwards compatibility
     )
   )
   class(mcpfit) = "mcpfit"

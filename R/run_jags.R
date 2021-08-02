@@ -1,3 +1,8 @@
+# ABOUT: These functions call the JAGS sampler and set up inputs in a way
+# that is appropriate for that, including data (get_jags_data()).
+# ------------------------------------------------------------------------
+
+
 #' Run parallel MCMC sampling using JAGS.
 #'
 #'
@@ -6,19 +11,15 @@
 #' @inheritParams mcp
 #' @inheritParams rjags::jags.model
 #' @inheritParams rjags::coda.samples
-#' @param jags_code A string. JAGS model, usually returned by `make_jagscode()`.
+#' @param jags_code A string. JAGS model, usually returned by `get_jags_code()`.
 #' @param pars Character vector of parameters to save/monitor.
-#' @param ST A segment table (tibble), returned by `get_segment_table`.
-#'   Only really used when the model contains varying effects.
 #' @return `mcmc.list``
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#'
-
 run_jags = function(data,
                     jags_code,
+                    jags_data,
                     pars,
-                    ST,
                     cores,
                     sample,
                     n.chains,
@@ -27,8 +28,8 @@ run_jags = function(data,
                     inits
 ) {
 
-  # Prevent failure of all mcp methods when length(pars) <= 2 (one parameter +
-  # loglik_).This always happens when there is only one parameter, so we just
+  # Prevent failure of all mcp methods when length(pars) <= 2.
+  # This always happens when there is only one parameter, so we just
   # save samples from the dummy change points.
   if (length(pars) <= 2)
     pars = c(pars, "cp_0", "cp_1")
@@ -46,12 +47,6 @@ run_jags = function(data,
     if (cores > 1)
       cores = 2
   }
-
-  # Get data ready...
-  jags_data = get_jags_data(data, ST, jags_code, sample)
-
-  # Start timer
-  timer = proc.time()
 
   # Define the sampling function in this environment.
   # Can be used sequentially or in parallel.
@@ -81,7 +76,8 @@ run_jags = function(data,
 
   # Time for sampling!
   if (cores == 1) {
-    # # SERIAL
+    # SERIAL
+    timer = proc.time()
     samples = try(do_sampling(
       seed = NULL,
       n.chains = n.chains,
@@ -90,8 +86,12 @@ run_jags = function(data,
 
   } else if (cores == "all" || cores > 1) {
     # PARALLEL using the future package and one chain per worker
+    if (future::nbrOfWorkers() == 1)
+      message("Setting up parallel workers...")
+    future::plan(future::multisession, .skip = TRUE)
+
     message("Parallel sampling in progress...")
-    future::plan(future::multiprocess, .skip = TRUE)
+    timer = proc.time()
     samples = future.apply::future_lapply(
       sample(1:1000, n.chains),  # Random seed to JAGS
       n.chains = 1,
@@ -105,20 +105,13 @@ run_jags = function(data,
     class(samples) = "mcmc.list"
   }
 
-  # Sampling finished. # Recover the levels of varying effects if it succeeded
+  # Sampling finished
+  passed = proc.time() - timer
+  message("Finished sampling in ", round(passed["elapsed"], 1), " seconds\n")
+
+  # Recover the levels of varying effects if it succeeded
   if (coda::is.mcmc.list(samples)) {
-    for (i in seq_len(nrow(ST))) {
-      S = ST[i, ]
-      if (!is.na(S$cp_group_col)) {
-        samples = recover_levels(samples, data, S$cp_group, S$cp_group_col)
-      }
-    }
-
-    # Return
-    passed = proc.time() - timer
-    message("Finished sampling in ", round(passed["elapsed"], 1), " seconds\n")
     return(samples)
-
   } else {
     # If it didn't succeed, quit gracefully.
     warning("--------------\nJAGS failed with the above error. Returning an `mcpfit` without samples. Inspect fit$prior and fit$jags_code to identify the problem. Read about typical problems and fixes here: https://lindeloev.github.io/mcp/articles/tips.html.")
@@ -137,8 +130,8 @@ run_jags = function(data,
 #' @inheritParams run_jags
 #' @param data A tibble
 #' @param ST A segment table (tibble), returned by `get_segment_table`.
-
-get_jags_data = function(data, ST, jags_code, sample) {
+#' @param rhs_table Returned by `get_rhs()`
+get_jags_data = function(data, family, ST, rhs_table, jags_code, sample) {
   cols_varying = unique(stats::na.omit(ST$cp_group_col))
 
   # Start with "raw" data
@@ -155,20 +148,31 @@ get_jags_data = function(data, ST, jags_code, sample) {
     jags_data[[col]] = as.numeric(factor(jags_data[[col]], levels = unique(jags_data[[col]])))
   }
 
+  # RHS data matrix
+  jags_data$rhs_matrix_ = get_rhs_matrix(rhs_table)
 
   # Add e.g. MINX = min(data$x) for all variables where they are used.
   # Searches whether it is in jags_code. If yes, add to jags_data
-  # TO DO: there must be a prettier way to do this.
+  # TO DO: there must be a more concise way than this...
   funcs = c("min", "max", "sd", "mean")
-  xy_vars = c("x", "y")
+
+  # For x
   for (func in funcs) {
-    for (xy_var in xy_vars) {
-      constant_name = toupper(paste0(func, xy_var))
-      if (stringr::str_detect(jags_code, constant_name)) {
-        func_eval = eval(parse(text = func))  # as real function
-        column = ST[, xy_var][[1]][1]
-        jags_data[[constant_name]] = func_eval(data[, column], na.rm = TRUE)
-      }
+    constant_name = toupper(paste0(func, "x"))  # No link function for x
+    if (stringr::str_detect(jags_code, constant_name)) {
+      column = ST$x[1]  # from x/y to data column name
+      linkdata = data[, column]  # No link function on x stuff
+      jags_data[[constant_name]] = get(func)(linkdata, na.rm = TRUE)  # Call func
+    }
+  }
+
+  # For y
+  for (func in funcs) {
+    constant_name =  toupper(paste0(func, "LINK", "y"))  # Link function applies to y
+    if (stringr::str_detect(jags_code, constant_name)) {
+      column = ST$y[1]  # from x/y to data column name
+      linkdata = family$linkfun(data[, column])  # No link function on x stuff
+      jags_data[[constant_name]] = get(func)(linkdata, na.rm = TRUE)  # Call func
     }
   }
 
@@ -185,7 +189,6 @@ get_jags_data = function(data, ST, jags_code, sample) {
 }
 
 
-
 #' Recover the levels of varying effects in mcmc.list
 #'
 #' Jags uses 1, 2, 3, ..., etc. for indexing of varying effects.
@@ -194,19 +197,23 @@ get_jags_data = function(data, ST, jags_code, sample) {
 #' @aliases recover_levels
 #' @keywords internal
 #' @param samples An mcmc.list with varying columns starting in `mcmc_col`.
-#' @param data A tibble or data.frame with the cols in `data_col`.
-#' @param mcmc_col A vector of strings.
-#' @param data_col A vector of strings. Has to be same length as `mcmc_col`.`
-#'
-recover_levels = function(samples, data, mcmc_col, data_col) {
-  # Get vectors of old ("from") and replacement column names in samples
-  from = colnames(samples[[1]])[stringr::str_starts(colnames(samples[[1]]), paste0(mcmc_col, '\\['))]  # Current column names
-  to = sprintf(paste0(mcmc_col, '[%s]'), unique(data[, data_col]))  # Desired column names
+#' @param data A tibble or data.frame
+recover_levels = function(samples, data, ST) {
+  for (i in seq_len(nrow(ST))) {
+    S = ST[i, ]
+    if (!is.na(S$cp_group_col)) {
+      # Get vectors of old ("from") and replacement column names in samples
+      from = colnames(samples[[1]])[stringr::str_starts(colnames(samples[[1]]), paste0(S$cp_group, '\\['))]  # Current column names
+      to = sprintf(paste0(S$cp_group, '[%s]'), unique(data[, S$cp_group_col]))  # Desired column names
 
-  # Recode column names on each list (chain) using lapply
-  names(to) = from
-  lapply(samples, function(x) {
-    colnames(x) = dplyr::recode(colnames(x), !!!to)
-    x
-  })
+      # Recode column names on each list (chain) using lapply
+      names(to) = from
+      samples = lapply(samples, function(x) {
+        colnames(x) = dplyr::recode(colnames(x), !!!to)
+        x
+      })
+    }
+  }
+
+  samples
 }

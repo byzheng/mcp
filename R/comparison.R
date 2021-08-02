@@ -3,17 +3,19 @@
 
 #' Compute information criteria for model comparison
 #'
-#' Takes an \code{\link{mcpfit}} as input and computes information criteria using loo or
-#' WAIC. Compare models using \code{\link[loo]{loo_compare}} and \code{\link[loo]{loo_model_weights}}.
+#' Compare models using \code{\link[loo]{loo_compare}} and \code{\link[loo]{loo_model_weights}}.
 #' more in \code{\link[loo]{loo}}.
 #'
-#' @aliases criterion
-#' @param fit An \code{\link{mcpfit}} object.
-#' @param criterion One of `"loo"` (calls \code{\link[loo]{loo}}) or `"waic"` (calls \code{\link[loo]{waic}}).
+#' @aliases loo LOO loo.mcpfit
+#' @inheritParams pp_eval
+#' @param x An \code{\link{mcpfit}} object.
 #' @param ... Further arguments passed to \code{\link[loo]{loo}}, e.g., `cores` or `save_psis`.
+#' @param pointwise `TRUE` calls calls \code{\link[loo]{loo.function}} which is slower but more memory efficient.
+#'   `FALSE` calls the default \code{\link[loo]{loo}}.
 #' @return a `loo` or `psis_loo` object.
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
+#' @export loo
 #' @export
 #' @examples
 #' \donttest{
@@ -30,54 +32,90 @@
 #' fit2$loo = loo(fit2)
 #' loo::loo_compare(fit1$loo, fit2$loo)
 #' }
-#'
-criterion = function(fit, criterion = "loo", ...) {
-  assert_mcpfit(fit)
-  assert_value(criterion, allowed = c("loo", "waic"))
+loo.mcpfit = function(x, ..., pointwise = FALSE, varying = TRUE, arma = TRUE, nsamples = NULL) {
+  fit = x
+  assert_types(fit, "mcpfit")
+  chain_id = rep(seq_along(fit$mcmc_post), each =  nrow(fit$mcmc_post[[1]]))
 
-  # Log-likelihood MCMC samples as matrix
-  loglik = as.matrix(do.call(rbind.data.frame, fit$mcmc_loglik))
 
-  # Add LOO
-  if (criterion == "loo") {
-    # Compute relative effective sample size (for each loglik col)
-    chain_id = rep(seq_along(fit$mcmc_post), each = nrow(fit$mcmc_post[[1]]))
-    r_eff = loo::relative_eff(exp(loglik), chain_id)  # Likelihood = exp(log-likelihood)
-    return(loo::loo(loglik, r_eff = r_eff, ...))
-  }
+  # Matrix: Fast but memory-greedy matrix-based computation
+  if (pointwise == FALSE) {
+    if (is.null(fit$loglik))
+      fit = add_loglik(fit, varying = varying, arma = arma, nsamples = nsamples)
+    r_eff = loo::relative_eff(exp(fit$loglik), chain_id)  # Likelihood = exp(log-likelihood)
+    loo::loo(fit$loglik, r_eff = r_eff, ...)
 
-  # Add WAIC
-  if (criterion == "waic") {
-    return(loo::waic(loglik))
+  # Pointwise: per-data-row computation
+  } else {
+    ar_order = get_ar_order(fit$.internal$rhs_table)
+
+    # For small models, the majority of the computation time will be pp_eval overhead
+    llfun = function(data_i, draws = NULL, with_exp) {
+      if (is.na(ar_order)) {
+        loglik = pp_eval(fit, newdata = data_i, summary = FALSE, type = "loglik", varying = varying, arma = arma, nsamples = nsamples)$loglik
+      } else {
+        # For ARMA, include the last N rows in call to pp_eval() too
+        data_rows = seq(max(1, data_i$row - ar_order), data_i$row)
+        lldata = fit$data[data_rows, ]
+        loglik = fit %>%
+          pp_eval(newdata = lldata, summary = FALSE, type = "loglik", varying = varying, arma = arma, nsamples = nsamples) %>%
+          dplyr::filter(data_row == max(data_row)) %>%  # last row
+          dplyr::pull(loglik)
+      }
+
+      # Return
+      if (with_exp) {
+        exp(loglik)
+      } else {
+        loglik
+      }
+    }
+    fit$data$row = seq_len(nrow(fit$data))
+    r_eff = loo::relative_eff(llfun, data = fit$data, chain_id, with_exp = TRUE)
+    loo::loo.function(llfun, data = fit$data, r_eff = r_eff, draws = NA, with_exp = FALSE)
   }
 }
 
-
-
-#' @aliases loo LOO loo.mcpfit
-#' @describeIn criterion Computes loo on mcpfit objects
-#' @param x An \code{\link{mcpfit}} object.
-#' @seealso \code{\link{criterion}}
-#' @importFrom loo loo
-#' @export loo
-#' @export
-#'
-loo.mcpfit = function(x, ...) {
-  criterion(x, "loo", ...)
-}
 
 #' @aliases waic WAIC waic.mcpfit
-#' @describeIn criterion Computes WAIC on mcpfit objects
-#' @param x An \code{\link{mcpfit}} object.
+#' @describeIn loo.mcpfit Computes WAIC on mcpfit objects
+#' @inheritParams loo.mcpfit
 #' @param ... Currently ignored
-#' @importFrom loo waic
-#' @seealso \code{\link{criterion}}
 #' @export waic
 #' @export
-#'
-waic.mcpfit = function(x, ...) {
+waic.mcpfit = function(x, ..., varying = TRUE, arma = TRUE, nsamples = NULL) {
   assert_ellipsis(...)
-  criterion(x, "waic")
+  fit = x
+  assert_types(fit, "mcpfit")
+  if (is.null(fit$loglik))
+    fit = add_loglik(fit, varying = varying, arma = arma, nsamples = nsamples)
+
+  loo::waic(fit$loglik)
+}
+
+
+#' Add log-likelihood to an mcpfit object.
+#'
+#' @aliases add_loglik
+#' @inheritParams loo.mcpfit
+#' @seealso loo.mcpfit waic.mcpfit
+#' @return An `mcpfit` object with `fit$loglik` filled as an (Nchains * Nsamples) x Ndata matrix.
+#' @export
+#' @examples
+#' \donttest{
+#' demo_fit = add_loglik(demo_fit)
+#' }
+add_loglik = function(x, varying = TRUE, arma = TRUE, nsamples = NULL) {
+  fit = x
+  fit$loglik = pp_eval(fit, type = "loglik", summary = FALSE, probs = FALSE, varying = varying, arma = arma, nsamples = nsamples) %>%
+    dplyr::select(.chain, .draw, data_row, loglik) %>%
+
+    # To matrix
+    tidyr::pivot_wider(id_cols =  c(.chain, .draw), names_from = data_row, values_from = loglik) %>%
+    dplyr::select(-.chain, -.draw) %>%
+    as.matrix()
+
+  fit
 }
 
 
@@ -104,10 +142,10 @@ waic.mcpfit = function(x, ...) {
 #'   The odds can be interpreted as a Bayes Factor. For example:
 #'
 #'   * `"cp_1 > 30"`:  the first change point is above 30.
-#'   * `"int_1 > int_2"`: the intercept is greater in segment 1 than 2.
+#'   * `"Intercept_1 > Intercept_2"`: the intercept is greater in segment 1 than 2.
 #'   * `"x_2 - x_1 <= 3"`: the difference between slope 1 and 2 is less
 #'       than or equal to 3.
-#'   * `"int_1 > -2 & int_1 < 2"`: int_1 is between -2 and 2 (an interval hypothesis). This can be useful as a Region Of Practical Equivalence test (ROPE).
+#'   * `"Intercept_1 > -2 & Intercept_1 < 2"`: Intercept_1 is between -2 and 2 (an interval hypothesis). This can be useful as a Region Of Practical Equivalence test (ROPE).
 #'   * `"cp_1^2 < 30 | (log(x_1) + log(x_2)) > 5"`: be creative.
 #'   * \code{"`cp_1_id[1]` > `cp_1_id[2]`"}: id1 is greater than id2, as estimated
 #'       through the varying-by-"id" change point in segment 1. Note that \code{``}
@@ -123,7 +161,7 @@ waic.mcpfit = function(x, ...) {
 #'   * `"cp_1 = 30"`: is the first change point at 30? Or to be more precise:
 #'       by what factor has the credence in cp_1 = 30 risen/fallen when
 #'       conditioning on the data, relative to the prior credence?
-#'   * `"int_1 + int_2 = 0"`: Is the sum of two intercepts zero?
+#'   * `"Intercept_1 + Intercept_2 = 0"`: Is the sum of two intercepts zero?
 #'   * ````"`cp_1_id[John]`/`cp_1_id[Erin]` = 2"````: is the varying change
 #'       point for John (which is relative to `cp_1``) double that of Erin?
 #' @return A data.frame with a row per hypothesis and the following columns:
@@ -139,19 +177,17 @@ waic.mcpfit = function(x, ...) {
 #'       For "=" it is the Savage-Dickey density ratio.
 #'       For directional hypotheses, it is p converted to odds.
 #'
-#' @importFrom dplyr .data
 #' @export
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#'
 hypothesis = function(fit, hypotheses, width = 0.95, digits = 3) {
-  assert_mcpfit(fit)
+  assert_types(fit, "mcpfit")
   assert_types(hypotheses, "character")
-  assert_numeric(width, lower = 0, upper = 1)
-  assert_integer(digits, lower = 0)
+  assert_numeric(width, lower = 0, upper = 1, len = 1)
+  assert_integer(digits, lower = 0, len = 1)
 
-  # Loop through hypotheses and populate return_df
-  return_df = data.frame()
+  # Loop through hypotheses and populate df_result
+  df_result = data.frame()
   for (expression in hypotheses) {
     ####################
     # PREPARE FOR TEST #
@@ -243,11 +279,11 @@ hypothesis = function(fit, hypotheses, width = 0.95, digits = 3) {
       BF = BF,
       stringsAsFactors = FALSE
     )
-    return_df = dplyr::bind_rows(return_df, new_row)
+    df_result = dplyr::bind_rows(df_result, new_row)
   }
 
   # Finally return
-  return(return_df)
+  df_result
 }
 
 
@@ -263,11 +299,10 @@ hypothesis = function(fit, hypotheses, width = 0.95, digits = 3) {
 #' @return A float
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#'
 get_density = function(samples, LHS, value) {
   samples = tidybayes::tidy_draws(samples) %>%
     dplyr::mutate(result = eval(parse(text = LHS)))
-  dens = stats::density(dplyr::pull(samples, "result"))
+  dens = stats::density(dplyr::pull(samples, "result"), bw = "SJ")
   dens_point = stats::spline(dens$x, dens$y, xout = value)$y
-  return(dens_point)
+  dens_point
 }

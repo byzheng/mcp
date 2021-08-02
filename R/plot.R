@@ -32,10 +32,6 @@
 #' @return A \pkg{ggplot2} object.
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#' @importFrom ggplot2 ggplot aes aes_string geom_line geom_point facet_wrap
-#' @importFrom magrittr %>%
-#' @importFrom rlang !! :=
-#' @importFrom dplyr .data
 #' @export
 #' @examples
 #' # Typical usage. demo_fit is an mcpfit object.
@@ -54,7 +50,6 @@
 #' library(ggplot2)
 #' plot(demo_fit) + theme_bw(15) + ggtitle("Great plot!")
 #' }
-#'
 plot.mcpfit = function(x,
                        facet_by = NULL,
                        lines = 25,
@@ -64,7 +59,7 @@ plot.mcpfit = function(x,
                        q_predict = FALSE,
                        rate = TRUE,
                        prior = FALSE,
-                       which_y = "ct",
+                       which_y = "mu",
                        arma = TRUE,
                        nsamples = 2000,
                        scale = "response",
@@ -76,10 +71,10 @@ plot.mcpfit = function(x,
   ########################
   # ASSERTS AND RECODING #
   ########################
-  assert_mcpfit(fit)
+  assert_types(fit, "mcpfit")
 
   if (lines != FALSE) {
-    assert_integer(lines, lower = 1)
+    assert_integer(lines, lower = 1, len = 1)
   } else {
     lines = 0
   }
@@ -100,7 +95,7 @@ plot.mcpfit = function(x,
     assert_numeric(q_predict, lower = 0, upper = 1)
 
   if (!is.null(nsamples)) {
-    assert_integer(nsamples, lower = 1)
+    assert_integer(nsamples, lower = 1, len = 1)
     if (lines != FALSE && nsamples < lines)
       stop("`lines` must be less than or equal to `nsamples`.")
   }
@@ -109,10 +104,10 @@ plot.mcpfit = function(x,
     nsamples = lines
 
   # Is facet_by a random/nested effect?
-  assert_types(facet_by, "null", "character")
-  if (!is.null(facet_by)) {
-    varying_groups = logical0_to_null(unique(stats::na.omit(fit$.other$ST$cp_group_col)))
-    if (!(facet_by %in% varying_groups))
+  assert_types(facet_by, "null", "character", len = c(0, 1))
+  if (is.character(facet_by)) {
+    varying_groups = logical0_to_null(unique(stats::na.omit(fit$.internal$ST$cp_group_col)))
+    if (facet_by %notin% varying_groups)
       stop("`facet_by` must be a data column and modeled as a varying effect.")
   }
 
@@ -207,25 +202,25 @@ plot.mcpfit = function(x,
   ###########
   # PLOT IT #
   ###########
-  # Initiate plot and show raw data (only applicable when which_y == "ct")
-  gg = ggplot(fit$data, aes_string(x = fit$pars$x, y = fit$pars$y))
-  if (which_y == "ct") {
+  # Initiate plot and show raw data (only applicable when which_y == "mu")
+  gg = ggplot2::ggplot(fit$data, ggplot2::aes_string(x = fit$pars$x, y = fit$pars$y))
+  if (which_y == "mu") {
     if (geom_data == "point") {
       if (is.null(fit$pars$weights)) {
-        gg = gg + geom_point()
+        gg = gg + ggplot2::geom_point()
       } else {
-        gg = gg + geom_point(aes(size = fit$data[, fit$pars$weights[1]])) +
+        gg = gg + ggplot2::geom_point(ggplot2::aes(size = fit$data[, fit$pars$weights[1]])) +
           ggplot2::scale_size_area(max_size = 2 * 1.5/sqrt(1.5))  # See https://stackoverflow.com/questions/63023877/setting-absolute-point-size-for-geom-point-with-scale-size-area/63024297?noredirect=1#comment111454629_63024297
       }
     } else if (geom_data == "line") {
-      gg = gg + geom_line()
+      gg = gg + ggplot2::geom_line()
     }
   }
 
   # Add lines?
   if (lines > 0) {
     data_lines = tidybayes::sample_draws(samples_expanded, lines)  # Only this number of lines
-    gg = gg + geom_line(aes(group = .data$.draw), data = data_lines, color = grDevices::rgb(0.5, 0.5, 0.5, 0.4))
+    gg = gg + ggplot2::geom_line(ggplot2::aes(group = .data$.draw), data = data_lines, color = grDevices::rgb(0.5, 0.5, 0.5, 0.4))
   }
 
   # Add quantiles?
@@ -242,7 +237,7 @@ plot.mcpfit = function(x,
 
     # The scale of the actual plot (or something close enough)
     # This is faster than limits_y = ggplot2::ggplot_build(gg)$layout$panel_params[[1]]$y.range
-    if (which_y == "ct" && geom_data != FALSE) {
+    if (which_y == "mu" && geom_data != FALSE) {
       limits_y = c(min(fit$data[, fit$pars$y]),
                    max(fit$data[, fit$pars$y]))
     } else if (any(q_predict != FALSE)) {
@@ -264,18 +259,18 @@ plot.mcpfit = function(x,
 
   # Add faceting?
   if (!is.null(facet_by))
-    gg = gg + facet_wrap(paste0("~", facet_by))
+    gg = gg + ggplot2::facet_wrap(paste0("~", facet_by))
 
   # Add better y-labels
   if (scale == "linear")
     gg = gg + ggplot2::labs(y = paste0(fit$family$link, "(", fit$pars$y, ")"))
   if (scale == "response" && (fit$family$family == "bernoulli" || (fit$family$family == "binomial" && rate == TRUE)))
     gg = gg + ggplot2::labs(y = paste0("P(", fit$pars$y, " = TRUE)"))
-  if (which_y != "ct")
+  if (which_y != "mu")
     gg = gg + ggplot2::labs(y = which_y)
 
-  gg = gg + ggplot2::theme(legend.position = "none")
-  return(gg)
+  # Return
+  gg + ggplot2::theme(legend.position = "none")
 }
 
 
@@ -296,13 +291,13 @@ geom_cp_density = function(fit, facet_by, limits_y) {
 
   # Get varying and population change point parameter names
   if (!is.null(facet_by)) {
-    cp_matches_facet = fit$.other$ST$cp_group_col == facet_by  # Varies by this column
+    cp_matches_facet = fit$.internal$ST$cp_group_col == facet_by  # Varies by this column
     cp_not_facet = cp_matches_facet == FALSE | is.na(cp_matches_facet)
-    varying = stats::na.omit(fit$.other$ST$cp_group[cp_matches_facet])  # The rest
-    population = stats::na.omit(fit$.other$ST$cp_name[cp_not_facet][-1])  # [-1] to remove cp_0
+    varying = stats::na.omit(fit$.internal$ST$cp_group[cp_matches_facet])  # The rest
+    population = stats::na.omit(fit$.internal$ST$cp_name[cp_not_facet][-1])  # [-1] to remove cp_0
   } else {
     varying = NULL
-    population = fit$.other$ST$cp_name[-1]
+    population = fit$.internal$ST$cp_name[-1]
   }
 
   # Get samples in long format
@@ -310,7 +305,7 @@ geom_cp_density = function(fit, facet_by, limits_y) {
     tidyr::pivot_longer(cols = tidyselect::starts_with("cp_"), names_to = "cp_name", values_to = "value")
 
   # Make the geom!
-  ggplot2::stat_density(aes(
+  ggplot2::stat_density(ggplot2::aes(
     x = value,
     y = ..scaled.. * diff(limits_y) * dens_scale +  # Scale to proportion of view
       limits_y[1] -  # Put on x-axis
@@ -321,7 +316,8 @@ geom_cp_density = function(fit, facet_by, limits_y) {
   data = samples,
   position = "identity",
   geom = "line",
-  show.legend = FALSE
+  show.legend = FALSE,
+  bw = "SJ"
   )
 }
 
@@ -338,20 +334,18 @@ geom_cp_density = function(fit, facet_by, limits_y) {
 #' @return A `ggplot2::geom_line` object.
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#'
 geom_quantiles = function(samples, quantiles, xvar, yvar, facet_by, ...) {
   data_quantiles = get_quantiles(samples, quantiles, xvar, yvar, facet_by)
 
   # Return geom
-  geom = ggplot2::geom_line(
-    mapping = aes(
+  ggplot2::geom_line(
+    mapping = ggplot2::aes(
       y = .data$y,
       group = .data$quantile
     ),
     data = data_quantiles,
     ...
   )
-  return(geom)
 }
 
 
@@ -392,7 +386,6 @@ geom_quantiles = function(samples, quantiles, xvar, yvar, facet_by, ...) {
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
 #' @return A \pkg{ggplot2} object.
-#' @import patchwork
 #' @export
 #' @examples
 #' # Typical usage. demo_fit is an mcpfit object.
@@ -401,7 +394,7 @@ geom_quantiles = function(samples, quantiles, xvar, yvar, facet_by, ...) {
 #' \dontrun{
 #' # More options
 #' plot_pars(demo_fit, regex_pars = "^cp_")  # Plot only change points
-#' plot_pars(demo_fit, pars = c("int_3", "time_3"))  # Plot these parameters
+#' plot_pars(demo_fit, pars = c("Intercept_3", "time_3"))  # Plot these parameters
 #' plot_pars(demo_fit, type = c("trace", "violin"))  # Combine plots
 #' # Some plots only take pairs. hex is good to assess identifiability
 #' plot_pars(demo_fit, type = "hex", pars = c("cp_1", "time_2"))
@@ -417,7 +410,6 @@ geom_quantiles = function(samples, quantiles, xvar, yvar, facet_by, ...) {
 #' library(ggplot2)
 #' plot_pars(demo_fit, type = c("trace", "dens_overlay")) * theme_bw(10)
 #' }
-
 plot_pars = function(fit,
                      pars = "population",
                      regex_pars = character(0),
@@ -426,7 +418,7 @@ plot_pars = function(fit,
                      prior = FALSE) {
 
   # Check arguments
-  assert_mcpfit(fit)
+  assert_types(fit, "mcpfit")
 
   if (!coda::is.mcmc.list(fit$mcmc_post) && !coda::is.mcmc.list(fit$mcmc_prior))
     stop("Cannot plot an mcpfit without prior or posterior samples.")
@@ -443,8 +435,9 @@ plot_pars = function(fit,
   if ("combo" %in% type && length(type) > 1)
     stop("'combo' type cannot be combined with other types. Replace 'combo' with the types you want combo\'ed")
 
-  assert_integer(ncol, lower = 1)
+  assert_integer(ncol, lower = 1, len = 1)
   assert_logical(prior)
+  bayesplot::available_mcmc()  # Quick fix to make R CMD Check happy that bayesplot is imported
 
   # Get posterior/prior samples
   samples = mcmclist_samples(fit, prior = prior)
@@ -467,32 +460,27 @@ plot_pars = function(fit,
   if ("combo" %in% type)
     type = c("dens_overlay", "trace")
 
-  # TO DO: a lot of eval(parse()) here. Is there a more built-in method?
-  #types = c("dens", "dens_overlay", "trace", "areas")
-  bayesplot::available_mcmc()  # quick fix to make R CMD Check happy that bayesplot is imported
+  # Call the relevant bayesplot plot function for each type
   takes_facet = c("areas", "dens", "dens_overlay", "trace", "hist", "intervals", "trace", "trace_highlight", "violin")
+  all_plots = list()
   for (this_type in type) {
-    this_facet = ifelse(this_type %in% takes_facet, paste0(", facet_args = list(ncol = ", ncol, ")"), "")
-    command = paste0("plot_", this_type, " = bayesplot::mcmc_", this_type, "(samples, pars = pars, regex_pars = regex_pars", this_facet, ")")
-    eval(parse(text = command)) + ggplot2::theme(strip.placement = NULL)
+    if (this_type %in% takes_facet) {
+      facet_args = list(ncol = ncol)
+    } else {
+      facet_args = list()
+    }
 
+    func_name = paste0("mcmc_", this_type)
+    func_obj = utils::getFromNamespace(func_name, "bayesplot")
+    all_plots[[this_type]] = func_obj(samples, pars = pars, regex_pars = regex_pars, facet_args = facet_args)
   }
 
-  # Select which to plot
-  if (length(type) == 1) {
-    return_plot = eval(parse(text = paste0("plot_", type)))
-    return_plot = return_plot
-  } else {
-    # Use patchwork
-    command = paste0(paste0("plot_", type), collapse = " + ")
-    return_plot = eval(parse(text = command))
-  }
-
-  # Return
-  return_plot & ggplot2::theme(
-    strip.placement = NULL,  # fixes bug: https://github.com/thomasp85/patchwork/issues/132
-    legend.position = "none"  # no legend on chains. Takes up too much space
-  )
+  # Then patch all_plots together and return
+  patchwork::wrap_plots(all_plots) &
+    ggplot2::theme(
+      strip.placement = NULL,  # fixes bug: https://github.com/thomasp85/patchwork/issues/132
+      legend.position = "none"  # no legend on chains. Takes up too much space
+    )
 }
 
 
@@ -513,11 +501,6 @@ plot_pars = function(fit,
 #' @param fit An mcpfit object.
 #' @return A vector of x-values to evaluate at.
 get_eval_at = function(fit, facet_by) {
-  # If there are ARMA terms, evaluate at the data
-  if (length(fit$pars$arma) > 0) {
-    return(c(fit$data[, fit$pars$x]))
-  }
-
   # Set resolutions in general and for change points
   X_RESOLUTION_ALL = 100  # Number of points to evaluate at x
   X_RESOLUTION_CP = 600
@@ -526,30 +509,36 @@ get_eval_at = function(fit, facet_by) {
   xmin = min(fit$data[, fit$pars$x])  # smallest observed X
   xmax = max(fit$data[, fit$pars$x])
 
+  # If there are ARMA terms, evaluate at the data
+  if (length(fit$pars$arma) > 0) {
+    return(c(fit$data[, fit$pars$x]))
+
   # Just give up for faceting and prior-plots (usually very distributed change points)
   # and return a reasonable resolution
-  if (!is.null(facet_by) || is.null(fit$mcmc_post)) {
+  } else if (!is.null(facet_by) || is.null(fit$mcmc_post)) {
     eval_at = seq(xmin, xmax, length.out = X_RESOLUTION_FACET)
     return(eval_at)
+
+  # Make regions of fine resolution within course resolution
+  } else {
+    # Make the coarse resolution
+    eval_at = seq(xmin, xmax, length.out = X_RESOLUTION_ALL)
+
+    # Add the finer resolution for each change point
+    cp_vars = paste0("cp_", seq_len(length(fit$model) - 1))  # change point columns
+    cp_hdis = fixef(fit, width = CP_INTERVAL)  # get the intervals
+    cp_hdis = cp_hdis[cp_hdis$name %in% cp_vars, ]  # select change points
+    for (i in seq_len(nrow(cp_hdis))) {
+      x_proportion = (cp_hdis$upper[i] - cp_hdis$lower[i]) / (xmax - xmin)  # how big a section of x is this CP's HDI?
+      length.out = ceiling(X_RESOLUTION_CP * x_proportion)  # number of x-points to add
+      add_this = seq(from = cp_hdis$lower[i],
+                     to = cp_hdis$upper[i],
+                     length.out = length.out)
+      eval_at = c(eval_at, add_this)
+    }
+
+    return(sort(eval_at))
   }
-
-  # Make the coarse resolution
-  eval_at = seq(xmin, xmax, length.out = X_RESOLUTION_ALL)
-
-  # Add the finer resolution for each change point
-  cp_vars = paste0("cp_", seq_len(length(fit$model) - 1))  # change point columns
-  cp_hdis = fixef(fit, width = CP_INTERVAL)  # get the intervals
-  cp_hdis = cp_hdis[cp_hdis$name %in% cp_vars, ]  # select change points
-  for (i in seq_len(nrow(cp_hdis))) {
-    x_proportion = (cp_hdis$upper[i] - cp_hdis$lower[i]) / (xmax - xmin)  # how big a section of x is this CP's HDI?
-    length.out = ceiling(X_RESOLUTION_CP * x_proportion)  # number of x-points to add
-    add_this = seq(from = max(xmin, cp_hdis$lower[i]),  # hack to avoid bug for relative cps. TO DO
-                   to = min(xmax, cp_hdis$upper[i]),  # hack to avoid bug for relative cps. TO DO
-                   length.out = length.out)
-    eval_at = c(eval_at, add_this)
-  }
-
-  return(sort(eval_at))
 }
 
 
@@ -576,7 +565,6 @@ get_eval_at = function(fit, facet_by) {
 #' pp_check(demo_fit, type = "ecdf_overlay")
 #' #pp_check(some_varying_fit, type = "loo_intervals", facet_by = "id")
 #' }
-#'
 pp_check = function(
   object,
   type = "dens_overlay",
@@ -590,12 +578,12 @@ pp_check = function(
 ) {
   # Internal mcp naming convention
   fit = object
-  assert_mcpfit(fit)
-  assert_types(facet_by, "null", "character")
+  assert_types(fit, "mcpfit")
+  assert_types(facet_by, "null", "character", len = c(0, 1))
   assert_logical(prior)
   assert_types(varying, "logical", "character")
   assert_logical(arma)
-  assert_integer(nsamples, lower = 1)
+  assert_integer(nsamples, lower = 1, len = 1)
 
   # Check and recode inputs
   if (!is.null(facet_by))
@@ -613,7 +601,7 @@ pp_check = function(
 
   allowed_types = stringr::str_remove(bayesplot::available_ppc(), "ppc_")
   allowed_types = allowed_types[stringr::str_detect(allowed_types, "_grouped") == FALSE]  # Grouped done mcp-side (see below)
-  if (!(type %in% allowed_types))
+  if (type %notin% allowed_types)
     stop("`type` must be one of '", paste0(allowed_types, collapse = "', '"), "'")
 
   # Get as tidy samples to preserve info on groups and sampled draws
@@ -625,7 +613,7 @@ pp_check = function(
     probs = FALSE,
     rate = FALSE,
     prior = prior,
-    which_y = "ct",
+    which_y = "mu",
     varying = varying,
     arma = arma,
     nsamples = nsamples,
@@ -635,8 +623,8 @@ pp_check = function(
   # Return plot with or without facets
   if (is.null(facet_by)) {
     yrep = tidy_to_matrix(samples, "predict")
-    plot_out = get_ppc_plot(fit, type, y, yrep, nsamples, samples$.draw, ...)  # One plot: use all of y and yrep
-    return(plot_out)
+    plot_return = get_ppc_plot(fit, type, y, yrep, nsamples)
+    return(plot_return)
   } else {
     groups = unique(varying_data)
     all_plots = list()
@@ -652,8 +640,8 @@ pp_check = function(
     }
 
     # Return faceted plot using patchwork
-    plot_out = patchwork::wrap_plots(all_plots) + patchwork::plot_layout(guides = "collect")
-    return(plot_out)
+    plot_return = patchwork::wrap_plots(all_plots) + patchwork::plot_layout(guides = "collect")
+    return(plot_return)
   }
 }
 
@@ -671,12 +659,15 @@ pp_check = function(
 #' @return A string
 #' @encoding UTF-8
 #' @author Jonas Kristoffer Lindeløv \email{jonas@@lindeloev.dk}
-#'
 get_ppc_plot = function(fit, type, y, yrep, nsamples, draws = NULL, ...) {
   is_loo = stringr::str_detect(type, "loo")
 
+  func_name = paste0("ppc_", type)
+  func_obj = utils::getFromNamespace(func_name, "bayesplot")
+
   if (is_loo == FALSE) {
-    bayesplot_call = paste0("bayesplot::ppc_", type, "(y, yrep, ...)")
+    return(suppressWarnings(func_obj(y, yrep, ...)))
+    #bayesplot_call = paste0("bayesplot::ppc_", type, "(y, yrep, ...)")
   } else if (is_loo == TRUE) {
     # Compute loo if missing
     fit = with_loo(fit, save_psis = TRUE, info = "Computing `fit$loo = loo(fit, save_psis = TRUE)`...")
@@ -688,9 +679,6 @@ get_ppc_plot = function(fit, type, y, yrep, nsamples, draws = NULL, ...) {
     attr(psis_object, "dims") = c(dim(yrep))
 
     # Build call (setting `samples` overwrites bayesplot defaults)
-    bayesplot_call = paste0("bayesplot::ppc_", type, "(y, yrep, psis_object = psis_object, lw = lw, samples = nsamples, ...)")
+    return(suppressWarnings(func_obj(y, yrep, psis_object = psis_object, lw = lw, samples = nsamples, ...)))
   }
-
-  plot_out = suppressWarnings(eval(parse(text = bayesplot_call)))
-  return(plot_out)
 }
